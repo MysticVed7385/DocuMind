@@ -56,8 +56,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📄 Automation of PDF Interaction")
-st.caption("Ask questions about any PDF using natural language — powered by LangChain + Groq (GPT-OSS 120B).")
+st.title("📄 DocuMind — Automation of PDF Interaction")
+st.caption("Ask questions about multiple PDFs using natural language — powered by LangChain + Groq (GPT-OSS 120B).")
 
 # ---------- 3. SESSION STATE ----------
 if "messages" not in st.session_state:
@@ -69,23 +69,43 @@ if "pdf_name" not in st.session_state:
 
 # ---------- 4. SIDEBAR ----------
 with st.sidebar:
-    st.header("📎 Upload Document")
-    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+    st.header("📎 Upload Documents")
+    uploaded_files = st.file_uploader(
+        "Choose PDF files",
+        type="pdf",
+        accept_multiple_files=True,
+    )
 
-    if uploaded_file and uploaded_file.name != st.session_state.pdf_name:
-        with st.spinner("Processing PDF… chunking, embedding, indexing"):
-            temp_path = f"temp_{uploaded_file.name}"
-            with open(temp_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+    # Create a unique key from all uploaded file names
+    current_files_key = "|".join(sorted([f.name for f in uploaded_files])) if uploaded_files else None
 
-            # Document chunking + contextual retrieval
-            loader = PyPDFLoader(temp_path)
-            docs = loader.load()
+    if uploaded_files and current_files_key != st.session_state.pdf_name:
+        with st.spinner(f"Processing {len(uploaded_files)} PDF(s)… chunking, embedding, indexing"):
+            # Process EACH uploaded PDF
+            all_docs = []
+            for uploaded_file in uploaded_files:
+                temp_path = f"temp_{uploaded_file.name}"
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
 
+                loader = PyPDFLoader(temp_path)
+                docs = loader.load()
+
+                # Add source metadata for citation transparency
+                for doc in docs:
+                    doc.metadata["source_file"] = uploaded_file.name
+
+                all_docs.extend(docs)
+
+                # Safe delete of the temp file after processing
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+            # Chunk all documents together
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000, chunk_overlap=200
             )
-            chunks = splitter.split_documents(docs)
+            chunks = splitter.split_documents(all_docs)
 
             embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
@@ -98,7 +118,7 @@ with st.sidebar:
                 template="""You are a precise PDF question-answering assistant.
 
 Use ONLY the context below to answer the question. If the answer is not in the 
-context, respond with: "I could not find that information in the PDF."
+context, respond with: "I could not find that information in the documents."
 
 When writing mathematical formulas, use LaTeX with $...$ for inline math 
 and $$...$$ for block equations.
@@ -111,8 +131,8 @@ Context:
 
 Question: {question}
 
-Answer (be concise and cite the page if possible):"""
-)
+Answer (be concise and cite the source file and page if possible):"""
+            )
 
             llm = ChatGroq(
                 model="openai/gpt-oss-120b",
@@ -128,18 +148,18 @@ Answer (be concise and cite the page if possible):"""
 
             st.session_state.chain = ConversationalRetrievalChain.from_llm(
                 llm=llm,
-                retriever=vectorstore.as_retriever(search_kwargs={"k": 4}),
+                retriever=vectorstore.as_retriever(search_kwargs={"k": 6}),
                 memory=memory,
                 combine_docs_chain_kwargs={"prompt": custom_prompt},
                 return_source_documents=True,
             )
-            st.session_state.pdf_name = uploaded_file.name
+            st.session_state.pdf_name = current_files_key
             st.session_state.messages = []
-            os.remove(temp_path)
-            st.success(f"✅ {uploaded_file.name} is ready!")
+            st.success(f"✅ {len(uploaded_files)} PDF(s) ready!")
 
     if st.session_state.pdf_name:
-        st.info(f"Active: **{st.session_state.pdf_name}**")
+        num_docs = len(st.session_state.pdf_name.split("|"))
+        st.info(f"Active: **{num_docs} document(s)**")
         if st.button("🗑️ Clear Chat"):
             st.session_state.messages = []
             st.rerun()
@@ -149,7 +169,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-user_q = st.chat_input("Ask something about the PDF…")
+user_q = st.chat_input("Ask something about the PDFs…")
 
 if user_q:
     st.session_state.messages.append({"role": "user", "content": user_q})
@@ -158,7 +178,7 @@ if user_q:
 
     if st.session_state.chain is None:
         with st.chat_message("assistant"):
-            st.warning("Please upload a PDF first.")
+            st.warning("Please upload PDF(s) first.")
     else:
         with st.chat_message("assistant"):
             with st.spinner("Thinking…"):
@@ -166,15 +186,15 @@ if user_q:
                 answer = result["answer"]
                 st.markdown(answer)
 
-                # Show source pages
+                # Show source pages with filenames
                 sources = result.get("source_documents", [])
                 if sources:
-                    pages = sorted({d.metadata.get("page", 0) + 1 for d in sources})
-                    with st.expander(f"📑 Sources — pages {pages}"):
+                    with st.expander(f"📑 Sources — {len(sources)} chunks"):
                         for d in sources:
-                            st.markdown(
-                                f"**Page {d.metadata.get('page', 0)+1}:** "
-                                f"{d.page_content[:300]}…"
-                            )
+                            source_name = d.metadata.get("source_file", "Unknown")
+                            page_num = d.metadata.get("page", 0) + 1
+                            st.markdown(f"**{source_name}** — Page {page_num}:")
+                            st.markdown(f"{d.page_content[:300]}…")
+                            st.divider()
 
         st.session_state.messages.append({"role": "assistant", "content": answer})
